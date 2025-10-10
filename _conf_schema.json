@@ -1,0 +1,8 @@
+{
+    "debounce_wait": {
+        "description": "防抖延迟时间",
+        "type": "int",
+        "hint": "单位（秒）",
+        "default": 10
+    }
+}

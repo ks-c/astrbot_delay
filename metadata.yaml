@@ -1,0 +1,5 @@
+name: astrbot_plugin_chat_buffer
+desc: 消息防抖，指定时间内的多段消息合并处理
+version: v1.0
+author: ctrlkk
+repo: https://github.com/ctrlkk/astrbot_plugin_chat_buffer
