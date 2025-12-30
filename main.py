@@ -11,6 +11,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
+import random
 
 @register(
     "astrbot_plugin_chat_buffer",
@@ -25,7 +26,8 @@ class DebouncePlugin(Star):
         self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
         default_wait = float(config.get("debounce_wait", 10))
-        self.DEFAULT_CONFIG = {"enabled": True, "wait": default_wait}
+        # jitter 代表波动幅度，0.25 意味着标准差是等待时间的 25%
+        self.DEFAULT_CONFIG = {"enabled": True, "wait": default_wait, "jitter": 0.25}
 
         # { uid: { "enabled": bool, "wait": float } }
         self.user_config: Dict[str, Dict[str, object]] = {}
@@ -74,17 +76,18 @@ class DebouncePlugin(Star):
         yield event.plain_result(f"防抖功能已{status}")
 
     @filter.command("设置防抖时间")
-    async def set_debounce_time(self, event: AstrMessageEvent, wait: int):
-        """设置防抖时间"""
+    async def set_jitter(self, event: AstrMessageEvent, jitter: float):
+        """设置防抖随机波动系数 (0.0-1.0)"""
         uid = event.unified_msg_origin
-        if wait < 1:
-            yield event.plain_result("防抖时间最少为1秒")
+        if jitter < 0 or jitter > 1.0:
+            yield event.plain_result("波动系数建议在 0.0 到 1.0 之间")
             return
+        
         cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
-        cfg["wait"] = wait
+        cfg["jitter"] = jitter
         self.user_config[uid] = cfg
         self._save_config()
-        yield event.plain_result(f"防抖时间已设置为 {wait} 秒")
+        yield event.plain_result(f"回复随机波动系数已设置为: {jitter}")
 
     def _get_lock(self, uid: str) -> asyncio.Lock:
         """获取/创建某个 uid 的独立锁"""
@@ -107,7 +110,25 @@ class DebouncePlugin(Star):
 
             async def debounce_closure():
                 try:
-                    await asyncio.sleep(wait)
+                    # === [核心修改开始] ===
+                    # 计算正态分布随机延迟
+                    # mu: 平均等待时间 (即你在配置里填的数字)
+                    # sigma: 标准差 (设为 0.25 表示波动幅度适中，模拟人的状态起伏)
+                    mu = float(wait)
+                    sigma = mu * 0.25 
+                    
+                    random_wait = random.gauss(mu, sigma)
+                    
+                    # 设置一个下限 (比如 2.0秒)，防止随机出太短的时间，不像是在阅读
+                    # 如果你设定的 wait 很大，这里也可以设 max(wait * 0.5, random_wait)
+                    final_wait = max(2.0, random_wait)
+
+                    # 打印日志，方便你在控制台看到苏云久这次思考了多久
+                    logger.info(f"[苏云久] 正在输入... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+
+                    await asyncio.sleep(final_wait)
+                    # === [核心修改结束] ===
+
                 except asyncio.CancelledError:
                     return None
 
