@@ -17,11 +17,15 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_delay_ksc",
     "ks-c",
     "消息防抖 (拟人化随机版)",
-    "1.6", # 版本升级：修复优先级导致的拦截失效问题
+    "1.7", # 版本升级：加入启动日志验证，强制刷新缓存
 )
 class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        
+        # === 启动日志：用于确认代码是否更新成功 ===
+        logger.info("[防抖插件] 正在加载... 当前版本: 1.7 (若未看到此行说明文件未更新)")
+        
         DATA_DIR = StarTools.get_data_dir()
         self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
@@ -121,7 +125,7 @@ class DebouncePlugin(Star):
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    logger.info(f"[防抖插件] 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+                    logger.info(f"[防抖插件] (v1.7) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
                     
                     await asyncio.sleep(final_wait)
                     
@@ -138,7 +142,7 @@ class DebouncePlugin(Star):
                         self.debounce_states.pop(uid, None)
                     
                     # === 阶段1：调用 LLM ===
-                    logger.info(f"[防抖插件] 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
+                    logger.info(f"[防抖插件] (v1.7) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
                     provider = self.context.get_using_provider()
                     if not provider:
                         logger.error("[防抖插件] 错误：未找到可用的 Provider")
