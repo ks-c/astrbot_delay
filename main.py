@@ -1,8 +1,8 @@
 import asyncio
-
 import json
 import os
 import tempfile
+import random  # 必须导入 random
 from typing import Dict
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -10,8 +10,6 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
-
-import random
 
 @register(
     "astrbot_plugin_chat_buffer",
@@ -75,7 +73,22 @@ class DebouncePlugin(Star):
         status = "开启" if cfg["enabled"] else "关闭"
         yield event.plain_result(f"防抖功能已{status}")
 
+    # === 【修复】补回了设置时间的指令 ===
     @filter.command("设置防抖时间")
+    async def set_debounce_time(self, event: AstrMessageEvent, wait: int):
+        """设置防抖时间 (秒)"""
+        uid = event.unified_msg_origin
+        if wait < 1:
+            yield event.plain_result("防抖时间最少为1秒")
+            return
+        cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
+        cfg["wait"] = wait
+        self.user_config[uid] = cfg
+        self._save_config()
+        yield event.plain_result(f"防抖等待时间已设置为 {wait} 秒")
+
+    # === 【修复】修改了指令名称，避免和上面冲突 ===
+    @filter.command("设置波动")
     async def set_jitter(self, event: AstrMessageEvent, jitter: float):
         """设置防抖随机波动系数 (0.0-1.0)"""
         uid = event.unified_msg_origin
@@ -95,13 +108,13 @@ class DebouncePlugin(Star):
             self.locks[uid] = asyncio.Lock()
         return self.locks[uid]
 
-    async def debounce_request(self, uid: str, prompt: str, wait: float) -> str:
+    # === 【修复】这里增加了 jitter 参数 ===
+    async def debounce_request(self, uid: str, prompt: str, wait: float, jitter: float = 0.25) -> str:
         """异步防抖函数：同一 uid 的请求在 wait 秒内合并"""
         lock = self._get_lock(uid)
         async with lock:
             state = self.debounce_states.get(uid)
             if state:
-                # 已有任务 -> 取消它，合并 prompt
                 state["task"].cancel()
                 state["prompts"].append(prompt)
                 await asyncio.sleep(0)
@@ -110,18 +123,15 @@ class DebouncePlugin(Star):
 
             async def debounce_closure():
                 try:
-                    # === [核心修改开始] ===
                     # 计算正态分布随机延迟
-                    # mu: 平均等待时间 (即你在配置里填的数字)
-                    # sigma: 标准差 (设为 0.25 表示波动幅度适中，模拟人的状态起伏)
-                    # 使用传入的 jitter 计算标准差 
                     mu = float(wait)
-                    sigma = mu * jitter  # 使用配置的波动值
+                    # 现在这里可以正确访问 jitter 变量了
+                    sigma = mu * jitter  
                     
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    logger.info(f"[角色] 正在输入... (基准:{mu}s | 波动:{jitter} | 实际:{final_wait:.2f}s)")
+                    logger.info(f"[苏云久] 正在输入... (基准:{mu}s | 波动:{jitter} | 实际:{final_wait:.2f}s)")
                     await asyncio.sleep(final_wait)
                 
                 except asyncio.CancelledError:
@@ -138,11 +148,9 @@ class DebouncePlugin(Star):
             task = asyncio.create_task(debounce_closure())
             self.debounce_states[uid]["task"] = task
 
-        # 注意：等待必须放在锁外，否则别的请求要等整个 wait 才能进入
         result = await task
         return result
 
-    # 设置为3，避免反复执行其它插件的耗时操作
     @filter.on_llm_request(priority=3)
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
         """请求开始"""
@@ -157,7 +165,11 @@ class DebouncePlugin(Star):
         if event.get_group_id() and req.prompt:
             req.prompt = f"[User ID: {id}, Nickname: {name}]\n{req.prompt.strip()}"
 
-        merged_prompt = await self.debounce_request(umo, req.prompt, wait=cfg["wait"])
+        current_jitter = cfg.get("jitter", 0.25)
+        
+        # 这里正确传递了 jitter 参数
+        merged_prompt = await self.debounce_request(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter)
+        
         if merged_prompt is None:
             event.stop_event()
             return
