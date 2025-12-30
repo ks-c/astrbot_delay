@@ -1,14 +1,57 @@
 {
-    "debounce_wait": {
-        "description": "防抖基准等待时间",
-        "type": "int",
-        "hint": "单位（秒），这是苏云久回复前的平均思考时间。",
-        "default": 10
-    },
-    "jitter": {
-        "description": "随机波动系数 (0.0 - 1.0)",
-        "type": "float",
-        "hint": "控制回复时间的随机程度。0为固定时间；0.25为模拟真人节奏（推荐）；0.5为非常不稳定。",
-        "default": 0.25
-    }
+  "enable": {
+    "description": "启用消息防抖动功能",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后插件将不会拦截和合并消息。注意：本插件强制仅在私聊启用，以避免群聊越权问题。",
+    "obvious_hint": true
+  },
+  "debounce_time": {
+    "description": "防抖时间均值 (秒)",
+    "type": "float",
+    "default": 2.0,
+    "hint": "正态分布的均值。用户在此时间(平均值)内发送的多条消息会被合并。建议设置为 1.5-3.0 秒",
+    "obvious_hint": true
+  },
+  "jitter": {
+    "description": "随机波动系数 (Jitter)",
+    "type": "float",
+    "default": 0.25,
+    "hint": "控制延迟的随机程度。标准差 = 均值 * jitter。推荐 0.25 (拟人化节奏)，设为 0.0 则为固定延迟。",
+    "obvious_hint": true
+  },
+  "command_prefixes": {
+    "description": "指令前缀列表",
+    "type": "list",
+    "default": [
+      "/"
+    ],
+    "hint": "以这些前缀开头的消息会被识别为指令，不会被合并。默认为 ['/']",
+    "invisible": false
+  },
+  "merge_separator": {
+    "description": "消息合并分隔符",
+    "type": "string",
+    "default": "\n",
+    "hint": "多条消息合并时使用的分隔符，默认为换行符"
+  },
+  "enable_forward_analysis": {
+    "description": "启用合并转发消息分析",
+    "type": "bool",
+    "default": true,
+    "hint": "是否自动提取QQ合并转发消息的内容并纳入防抖处理（仅aiocqhttp平台支持）",
+    "obvious_hint": true
+  },
+  "forward_prefix": {
+    "description": "合并转发内容前缀",
+    "type": "string",
+    "default": "【合并转发内容】\n",
+    "hint": "在提取的合并转发内容前添加的标识前缀"
+  },
+  "bot_reply_hint": {
+    "description": "Bot自己消息的引用提示",
+    "type": "string",
+    "default": "[系统提示：以上引用的消息是你(助手)之前发送的内容，不是用户说的话]",
+    "hint": "当用户引用Bot自己发送的消息时，附加的系统提示词，用于提醒LLM这是它自己说的话"
+  }
 }
