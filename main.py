@@ -12,11 +12,13 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
 @register(
-    "astrbot_plugin_chat_buffer",
-    "ctrlkk",
-    "消息防抖，指定时间内的多段消息合并处理",
-    "1.0",
+    "astrbot_plugin_delay",        # <--- 修改ID (建议改个名，避免和原版冲突)
+    "ks-c",                        # <--- 修改成你的名字
+    "消息防抖 (拟人化随机版)",       # <--- 修改描述，方便你区分
+    "1.1",                         # <--- 升级一下版本号
 )
+
+class DebouncePlugin(Star):
 class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
