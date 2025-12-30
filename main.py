@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import tempfile
-import random  # 必须导入 random
+import random
 from typing import Dict
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -12,13 +12,12 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
 @register(
-    "astrbot_plugin_delay",        # <--- 修改ID (建议改个名，避免和原版冲突)
-    "ks-c",                        # <--- 修改成你的名字
-    "消息防抖 (拟人化随机版)",       # <--- 修改描述，方便你区分
-    "1.1",                         # <--- 升级一下版本号
+    "astrbot_plugin_delay_ksc",    # ID已修改
+    "ks-c",                        # 作者已修改
+    "消息防抖 (拟人化随机版)",       # 描述已修改
+    "1.1",                         # 版本已升级
 )
-
-class DebouncePlugin(Star):
+class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之前重复了
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         DATA_DIR = StarTools.get_data_dir()
@@ -74,7 +73,6 @@ class DebouncePlugin(Star):
         status = "开启" if cfg["enabled"] else "关闭"
         yield event.plain_result(f"防抖功能已{status}")
 
-    # === 【修复】补回了设置时间的指令 ===
     @filter.command("设置防抖时间")
     async def set_debounce_time(self, event: AstrMessageEvent, wait: int):
         """设置防抖时间 (秒)"""
@@ -88,7 +86,6 @@ class DebouncePlugin(Star):
         self._save_config()
         yield event.plain_result(f"防抖等待时间已设置为 {wait} 秒")
 
-    # === 【修复】修改了指令名称，避免和上面冲突 ===
     @filter.command("设置波动")
     async def set_jitter(self, event: AstrMessageEvent, jitter: float):
         """设置防抖随机波动系数 (0.0-1.0)"""
@@ -109,7 +106,6 @@ class DebouncePlugin(Star):
             self.locks[uid] = asyncio.Lock()
         return self.locks[uid]
 
-    # === 【修复】这里增加了 jitter 参数 ===
     async def debounce_request(self, uid: str, prompt: str, wait: float, jitter: float = 0.25) -> str:
         """异步防抖函数：同一 uid 的请求在 wait 秒内合并"""
         lock = self._get_lock(uid)
@@ -126,7 +122,6 @@ class DebouncePlugin(Star):
                 try:
                     # 计算正态分布随机延迟
                     mu = float(wait)
-                    # 现在这里可以正确访问 jitter 变量了
                     sigma = mu * jitter  
                     
                     random_wait = random.gauss(mu, sigma)
@@ -168,7 +163,6 @@ class DebouncePlugin(Star):
 
         current_jitter = cfg.get("jitter", 0.25)
         
-        # 这里正确传递了 jitter 参数
         merged_prompt = await self.debounce_request(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter)
         
         if merged_prompt is None:
@@ -185,10 +179,9 @@ class DebouncePlugin(Star):
         async with lock:
             state = self.debounce_states.get(uid)
             if state and state["task"]:
-                # 取消正在进行的防抖任务
                 state["task"].cancel()
                 try:
                     await state["task"]
                 except asyncio.CancelledError:
-                    pass  # 预期的取消错误
+                    pass
             self.debounce_states.pop(uid, None)
