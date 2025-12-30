@@ -1,8 +1,14 @@
 {
     "debounce_wait": {
-        "description": "防抖延迟时间",
+        "description": "防抖基准等待时间",
         "type": "int",
-        "hint": "单位（秒）",
+        "hint": "单位（秒），这是苏云久回复前的平均思考时间。",
         "default": 10
+    },
+    "jitter": {
+        "description": "随机波动系数 (0.0 - 1.0)",
+        "type": "float",
+        "hint": "控制回复时间的随机程度。0为固定时间；0.25为模拟真人节奏（推荐）；0.5为非常不稳定。",
+        "default": 0.25
     }
 }
