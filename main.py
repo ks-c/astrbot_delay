@@ -1,225 +1,357 @@
 import asyncio
 import json
-import os
-import tempfile
 import random
-from typing import Dict
-from astrbot.api.all import * # 引入所有基础组件，包括 Plain
-from astrbot.api.message_components import MessageChain # 显式导入 MessageChain
-from astrbot.api.event import filter, AstrMessageEvent
+from typing import List, Tuple, Dict, Optional
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
-from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.provider.entities import LLMResponse, ProviderRequest
-from astrbot.core.star.star_tools import StarTools
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api import AstrBotConfig, logger
+import astrbot.api.message_components as Comp
 
-# === 强制日志：确保在控制台可见 ===
-logger.warning("====== [防抖插件 v2.1] 模块正在加载！若未见此行，说明旧文件未被替换！ ======")
+# 检查是否为 aiocqhttp 平台
+try:
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+    IS_AIOCQHTTP = True
+except ImportError:
+    IS_AIOCQHTTP = False
 
 @register(
-    "astrbot_delay",
-    "ks-c",
-    "消息防抖 (拟人化随机版)",
-    "2.1", # 版本升级：加入Provider获取的兼容性处理
+    "continuous_message",
+    "aliveriver_mod",
+    "消息防抖动插件(拟人化随机版) - 支持标准差与正态分布延迟",
+    "2.2.0"
 )
-class DebouncePlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
-        super().__init__(context)
-        
-        logger.info("[防抖插件] v2.1 实例初始化成功。")
-        
-        DATA_DIR = StarTools.get_data_dir()
-        self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-
-        default_wait = float(config.get("debounce_wait", 10))
-        self.DEFAULT_CONFIG = {"enabled": True, "wait": default_wait, "jitter": 0.25}
-
-        self.user_config: Dict[str, Dict[str, object]] = {}
-        self.debounce_states: Dict[str, Dict] = {}
-        self.locks: Dict[str, asyncio.Lock] = {}
-
-        self._load_config()
-
-    async def initialize(self): pass
-    async def terminate(self): pass
+class ContinuousMessagePlugin(Star):
+    """
+    消息防抖动插件 v2.2.0 (拟人化修改版)
     
-    def _load_config(self):
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                    self.user_config = json.load(f)
-            except Exception as e:
-                logger.error(f"加载防抖配置失败: {e}")
-
-    def _save_config(self):
-        try:
-            dirpath = os.path.dirname(self.CONFIG_FILE)
-            fd, tmppath = tempfile.mkstemp(dir=dirpath, prefix="cfg-", suffix=".json")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self.user_config, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmppath, self.CONFIG_FILE)
-        except Exception as e:
-            logger.error(f"保存防抖配置失败: {e}")
-
-    @filter.command("开关防抖")
-    async def toggle_debounce(self, event: AstrMessageEvent):
-        uid = event.unified_msg_origin
-        cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
-        cfg["enabled"] = not cfg.get("enabled", False)
-        self.user_config[uid] = cfg
-        self._save_config()
-        status = "开启" if cfg["enabled"] else "关闭"
-        yield event.plain_result(f"防抖功能已{status}")
-
-    @filter.command("设置防抖时间")
-    async def set_debounce_time(self, event: AstrMessageEvent, wait: int):
-        uid = event.unified_msg_origin
-        if wait < 1:
-            yield event.plain_result("防抖时间最少为1秒")
-            return
-        cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
-        cfg["wait"] = wait
-        self.user_config[uid] = cfg
-        self._save_config()
-        yield event.plain_result(f"防抖等待时间已设置为 {wait} 秒")
-
-    @filter.command("设置波动")
-    async def set_jitter(self, event: AstrMessageEvent, jitter: float):
-        uid = event.unified_msg_origin
-        if jitter < 0 or jitter > 1.0:
-            yield event.plain_result("波动系数建议在 0.0 到 1.0 之间")
-            return
-        cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
-        cfg["jitter"] = jitter
-        self.user_config[uid] = cfg
-        self._save_config()
-        yield event.plain_result(f"回复随机波动系数已设置为: {jitter}")
-
-    def _get_lock(self, uid: str) -> asyncio.Lock:
-        if uid not in self.locks:
-            self.locks[uid] = asyncio.Lock()
-        return self.locks[uid]
-
-    async def start_debounce_task(self, uid: str, prompt: str, wait: float, jitter: float, event: AstrMessageEvent):
-        lock = self._get_lock(uid)
-        async with lock:
-            state = self.debounce_states.get(uid)
-            
-            if state:
-                # 核心逻辑：如果有任务，取消它（实现合并），并追加内容
-                state["task"].cancel()
-                state["prompts"].append(prompt)
-                state["last_event"] = event 
-                logger.info(f"[防抖插件] 检测到新消息，已合并。当前缓冲池大小: {len(state['prompts'])}")
-            else:
-                self.debounce_states[uid] = {
-                    "prompts": [prompt], 
-                    "task": None,
-                    "last_event": event
-                }
-
-            async def debounce_closure():
-                try:
-                    mu = float(wait)
-                    sigma = mu * jitter  
-                    random_wait = random.gauss(mu, sigma)
-                    final_wait = max(2.0, random_wait)
-                    
-                    logger.info(f"[防抖插件] (v2.1) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
-                    
-                    await asyncio.sleep(final_wait)
-                    
-                    merged_prompt = ""
-                    last_evt = None
-                    
-                    async with self._get_lock(uid):
-                        current_state = self.debounce_states.get(uid)
-                        if not current_state: return
-                        
-                        # 合并多条消息，用换行符分隔
-                        merged_prompt = "\n".join(current_state["prompts"])
-                        last_evt = current_state["last_event"]
-                        self.debounce_states.pop(uid, None)
-                    
-                    # === 阶段1：调用 LLM ===
-                    logger.info(f"[防抖插件] (v2.1) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
-                    
-                    # 兼容性获取 Provider
-                    provider = None
-                    if hasattr(self.context, "get_using_provider"):
-                        provider = self.context.get_using_provider()
-                    elif hasattr(self.context, "provider_manager"):
-                        # 尝试旧版路径，增加安全检查
-                        if hasattr(self.context.provider_manager, "get_default_provider"):
-                            provider = self.context.provider_manager.get_default_provider()
-
-                    if not provider:
-                        logger.error("[防抖插件] 错误：未找到可用的 Provider (get_using_provider 失败)")
-                        return
-
-                    # 尝试调用 text_chat
-                    response = await provider.text_chat(merged_prompt, session_id=uid)
-                    
-                    if not response or not response.completion_text:
-                        logger.warning("[防抖插件] LLM 返回内容为空")
-                        return
-
-                    logger.info(f"[防抖插件] LLM 生成完毕，准备发送回复")
-
-                    # === 阶段2：发送消息 ===
-                    msg_chain = MessageChain([Plain(response.completion_text)])
-                    await last_evt.send(msg_chain)
-
-                except asyncio.CancelledError:
-                    # 正常现象：倒计时被新消息打断
-                    pass
-                except Exception as e:
-                    import traceback
-                    logger.error(f"防抖回复过程出错: {e}")
-                    logger.error(traceback.format_exc())
-
-            task = asyncio.create_task(debounce_closure())
-            self.debounce_states[uid]["task"] = task
-
-    # 修改优先级为 0 (最高)，确保比系统默认处理先执行
-    # 使用 *args 和 **kwargs 接收一切参数，彻底杜绝 TypeError
-    @filter.on_llm_request(priority=0)
-    async def on_llm_req(self, event: AstrMessageEvent, *args, **kwargs):
+    核心修改：
+    引入 random.gauss 实现正态分布延迟，模拟真人回复的节奏感。
+    """
+    
+    def __init__(self, context: Context, config: AstrBotConfig = None):
+        super().__init__(context)
+        self.config = config or {}
         
-        req = None
-        # 尝试从参数中提取 ProviderRequest
-        for arg in args:
-            if isinstance(arg, ProviderRequest):
-                req = arg
+        # === 核心配置 ===
+        # 1. 防抖时间均值 (Mean)
+        self.debounce_time = float(self.config.get('debounce_time', 2.0))
+        # 2. 波动系数 (Jitter)，标准差 SD = debounce_time * jitter
+        # 推荐 0.25 (模拟真人)，0.0 为固定时间
+        self.jitter = float(self.config.get('jitter', 0.25))
+        
+        self.command_prefixes = self.config.get('command_prefixes', ['/'])
+        self.enable_plugin = self.config.get('enable', True)
+        self.merge_separator = self.config.get('merge_separator', '\n')
+        self.enable_forward_analysis = self.config.get('enable_forward_analysis', True)
+        self.forward_prefix = self.config.get('forward_prefix', '【合并转发内容】\n')
+        
+        self.reply_format = '[引用消息({sender_name}: {full_text})]'
+        self.bot_reply_hint = self.config.get('bot_reply_hint', '[系统提示：以上引用的消息是你(助手)之前发送的内容，不是用户说的话]')
+        
+        self.sessions: Dict[str, Dict] = {}
+        
+        self._ImageComponent = None
+        self._PlainComponent = None
+        
+        # 动态导入组件，兼容不同版本
+        try:
+            from astrbot.api.message_components import Image, Plain
+            self._ImageComponent = Image
+            self._PlainComponent = Plain
+        except ImportError:
+            try:
+                from astrbot.api.message import Image, Plain
+                self._ImageComponent = Image
+                self._PlainComponent = Plain
+            except ImportError:
+                logger.error("[消息防抖动] 严重: 组件导入失败")
+
+        logger.info(f"[消息防抖动] v2.2.0 加载 | 均值: {self.debounce_time}s | 波动系数: {self.jitter} (SD=±{self.debounce_time * self.jitter:.2f}s)")
+
+    def is_command(self, message: str) -> bool:
+        message = message.strip()
+        if not message: return False
+        for prefix in self.command_prefixes:
+            if message.startswith(prefix): return True
+        return False
+
+    def _parse_message(self, message_obj) -> Tuple[str, bool, List[str]]:
+        text = ""
+        has_image = False
+        image_urls = []
+        try:
+            if not hasattr(message_obj, "message"): return "", False, []
+            for component in message_obj.message:
+                if component.__class__.__name__ == 'Reply': continue
+                
+                if hasattr(component, 'text') and component.text:
+                    text += component.text
+                elif hasattr(component, 'content') and component.content:
+                    text += component.content
+                
+                is_img = False
+                if self._ImageComponent and isinstance(component, self._ImageComponent): is_img = True
+                elif component.__class__.__name__ == 'Image': is_img = True
+                
+                if is_img:
+                    has_image = True
+                    if hasattr(component, 'url') and component.url: image_urls.append(component.url)
+                    elif hasattr(component, 'file') and component.file: image_urls.append(component.file)
+        except Exception:
+            pass
+        return text, has_image, image_urls
+
+    def _reconstruct_event(self, event: AstrMessageEvent, text: str, image_urls: List[str]):
+        event.message_str = text
+        if not self._PlainComponent: return
+
+        chain = []
+        if text:
+            chain.append(self._PlainComponent(text=text))
+        
+        if image_urls and self._ImageComponent:
+            for url in image_urls:
+                try:
+                    chain.append(self._ImageComponent(file=url))
+                except TypeError:
+                    chain.append(self._ImageComponent(url=url))
+                except Exception: pass
+        
+        if hasattr(event.message_obj, "message"):
+            try:
+                event.message_obj.message = chain
+            except Exception: pass
+
+    async def _timer_coroutine(self, uid: str, mean_duration: float):
+        """
+        计时器协程：使用高斯分布计算随机延迟
+        """
+        try:
+            # === 核心修改：正态分布计算 ===
+            mu = mean_duration
+            sigma = mu * self.jitter
+            
+            # 生成随机等待时间
+            random_wait = random.gauss(mu, sigma)
+            # 设定硬性下限 (0.5s)，防止随机出负数或过快
+            final_wait = max(0.5, random_wait)
+            
+            logger.info(f"[消息防抖动] 启动倒计时... (均值:{mu}s | SD:{sigma:.2f} | 实际:{final_wait:.2f}s)")
+            
+            await asyncio.sleep(final_wait)
+            
+            # 时间到且未被取消，触发结算事件
+            if uid in self.sessions:
+                self.sessions[uid]['flush_event'].set()
+                
+        except asyncio.CancelledError:
+            # 任务被取消（说明有新消息到来）
+            pass
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=50)
+    async def handle_private_msg(self, event: AstrMessageEvent):
+        if not self.enable_plugin or self.debounce_time <= 0: return
+
+        # 0. 检测并处理合并转发消息
+        forward_text = ""
+        forward_images = []
+        if self.enable_forward_analysis and IS_AIOCQHTTP and isinstance(event, AiocqhttpMessageEvent):
+            forward_id = await self._detect_forward_message(event)
+            if forward_id:
+                try:
+                    forward_text, forward_images = await self._extract_forward_content(event, forward_id)
+                    if forward_text or forward_images:
+                        logger.info(f"[消息防抖动] 检测到合并转发 | 文本: {len(forward_text)}字")
+                except Exception as e:
+                    logger.error(f"[消息防抖动] 提取合并转发失败: {e}")
+            else:
+                reply_text, reply_images = await self._extract_reply_content(event)
+                if reply_text or reply_images:
+                    forward_text = reply_text
+                    forward_images = reply_images
+
+        # 1. 解析消息内容
+        raw_text, has_image, current_urls = self._parse_message(event.message_obj)
+        if not raw_text: raw_text = (event.message_str or "").strip()
+        
+        if forward_text:
+            if forward_text.startswith('[引用消息('):
+                raw_text = forward_text + ("\n" + raw_text if raw_text else "")
+            else:
+                prefix_text = self.forward_prefix + forward_text
+                raw_text = prefix_text + ("\n" + raw_text if raw_text else "")
+        if forward_images:
+            current_urls.extend(forward_images)
+            has_image = True
+        
+        uid = event.unified_msg_origin
+
+        # 2. 处理指令消息：立即中断防抖
+        if self.is_command(raw_text):
+            if uid in self.sessions:
+                if self.sessions[uid].get('timer_task'):
+                    self.sessions[uid]['timer_task'].cancel()
+                self.sessions[uid]['flush_event'].set()
+            return
+
+        # 3. 忽略空消息
+        if not raw_text and not has_image: return
+
+        # ================== 核心防抖逻辑 ==================
+
+        # 场景 A: 追加到现有会话
+        if uid in self.sessions:
+            session = self.sessions[uid]
+            
+            if raw_text: session['buffer'].append(raw_text)
+            if current_urls: session['images'].extend(current_urls)
+            
+            # 核心修改：重置计时器时，使用正态分布
+            if session.get('timer_task'):
+                session['timer_task'].cancel()
+            
+            session['timer_task'] = asyncio.create_task(
+                self._timer_coroutine(uid, self.debounce_time)
+            )
+            
+            event.stop_event()
+            return
+
+        # 场景 B: 启动新会话
+        flush_event = asyncio.Event()
+        timer_task = asyncio.create_task(
+            self._timer_coroutine(uid, self.debounce_time)
+        )
+        
+        self.sessions[uid] = {
+            'buffer': [raw_text] if raw_text else [],
+            'images': current_urls,
+            'flush_event': flush_event,
+            'timer_task': timer_task
+        }
+        
+        logger.info(f"[消息防抖动] 开始收集 - 用户: {uid}")
+
+        # 挂起主协程，等待 _timer_coroutine 里的 sleep 结束
+        await flush_event.wait()
+        
+        # ================== 结算阶段 ==================
+        if uid not in self.sessions: return
+        session_data = self.sessions.pop(uid)
+        
+        buffer = session_data['buffer']
+        all_images = session_data['images']
+        merged_text = self.merge_separator.join(buffer).strip()
+        
+        if not merged_text and not all_images: return
+
+        img_info = f" + {len(all_images)}图" if all_images else ""
+        logger.info(f"[消息防抖动] 结算触发 - 共 {len(buffer)} 条{img_info} -> 发送")
+        
+        # 重构事件
+        self._reconstruct_event(event, merged_text, all_images)
+        return
+
+    async def _detect_forward_message(self, event: AiocqhttpMessageEvent) -> Optional[str]:
+        # (保持原版逻辑不变)
+        for seg in event.message_obj.message:
+            if isinstance(seg, Comp.Forward):
+                return seg.id
+        
+        reply_seg = None
+        for seg in event.message_obj.message:
+            if isinstance(seg, Comp.Reply):
+                reply_seg = seg
                 break
         
-        # 如果 args 里没找到，可能 user 代码没更新，或者 AstrBot API 变了
-        # 但大概率是 args[0] 就是 req
-        if not req and args and isinstance(args[0], ProviderRequest):
-            req = args[0]
+        if reply_seg:
+            try:
+                client = event.bot
+                original_msg = await client.api.call_action('get_msg', message_id=reply_seg.id)
+                if original_msg and 'message' in original_msg:
+                    original_message_chain = original_msg['message']
+                    if isinstance(original_message_chain, list):
+                        for segment in original_message_chain:
+                            if isinstance(segment, dict) and segment.get("type") == "forward":
+                                return segment.get("data", {}).get("id")
+            except Exception: pass
+        return None
+
+    async def _extract_reply_content(self, event: AiocqhttpMessageEvent) -> Tuple[str, List[str]]:
+        # (保持原版逻辑不变，省略冗长部分以节省篇幅，功能与原文件一致)
+        # 此处代码逻辑未变动
+        reply_seg = None
+        for seg in event.message_obj.message:
+            if isinstance(seg, Comp.Reply):
+                reply_seg = seg
+                break
+        if not reply_seg: return "", []
+        
+        try:
+            client = event.bot
+            original_msg = await client.api.call_action('get_msg', message_id=reply_seg.id)
+            if not original_msg or 'message' not in original_msg: return "", []
             
-        if not req:
-            return
+            sender_name = original_msg.get('sender', {}).get('nickname', '未知用户')
+            original_message_chain = original_msg['message']
+            content_chain = self._parse_raw_content(original_message_chain)
+            
+            text_parts = []
+            image_urls = []
+            for segment in content_chain:
+                if not isinstance(segment, dict): continue
+                if segment.get("type") == "text":
+                    text_parts.append(segment.get("data", {}).get("text", ""))
+                elif segment.get("type") == "image":
+                    url = segment.get("data", {}).get("url")
+                    if url: image_urls.append(url)
+                    text_parts.append("[图片]")
+            
+            full_text = "".join(text_parts).strip()
+            if not full_text: return "", image_urls
+            
+            formatted_text = self.reply_format.format(sender_name=sender_name, full_text=full_text)
+            return formatted_text, image_urls
+        except Exception: return "", []
 
-        umo = event.unified_msg_origin
-        id = event.get_sender_id()
-        name = event.get_sender_name()
+    async def _extract_forward_content(self, event: AiocqhttpMessageEvent, forward_id: str) -> Tuple[str, List[str]]:
+        # (保持原版逻辑不变)
+        client = event.bot
+        try:
+            forward_data = await client.api.call_action('get_forward_msg', id=forward_id)
+        except Exception: raise ValueError("获取合并转发失败")
+
+        if not forward_data or "messages" not in forward_data: return "", []
         
-        cfg = self.user_config.get(umo, self.DEFAULT_CONFIG)
-        if not cfg["enabled"]:
-            return
+        extracted_texts = []
+        image_urls = []
+        for message_node in forward_data["messages"]:
+            sender_name = message_node.get("sender", {}).get("nickname", "未知用户")
+            raw_content = message_node.get("message") or message_node.get("content", [])
+            content_chain = self._parse_raw_content(raw_content)
+            
+            node_text_parts = []
+            for segment in content_chain:
+                if not isinstance(segment, dict): continue
+                if segment.get("type") == "text":
+                    node_text_parts.append(segment.get("data", {}).get("text", ""))
+                elif segment.get("type") == "image":
+                    url = segment.get("data", {}).get("url")
+                    if url: 
+                        image_urls.append(url)
+                        node_text_parts.append("[图片]")
+            
+            full_node_text = "".join(node_text_parts).strip()
+            if full_node_text: extracted_texts.append(f"{sender_name}: {full_node_text}")
 
-        # 构造带有用户身份的 Prompt
-        if event.get_group_id() and req.prompt:
-            req.prompt = f"[User ID: {id}, Nickname: {name}]\n{req.prompt.strip()}"
+        return "\n".join(extracted_texts), image_urls
 
-        current_jitter = cfg.get("jitter", 0.25)
-
-        # 启动防抖任务
-        await self.start_debounce_task(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter, event=event)
-        
-        # 拦截事件：阻止 AstrBot 继续处理这条消息
-        # 此时 priority=0，我们是第一个拿到的，只要 stop 成功，后面谁也拿不到
-        event.stop_event()
+    def _parse_raw_content(self, raw_content) -> List[dict]:
+        if isinstance(raw_content, list): return raw_content
+        if isinstance(raw_content, str):
+            try:
+                parsed = json.loads(raw_content)
+                if isinstance(parsed, list): return parsed
+            except: pass
+            return [{"type": "text", "data": {"text": raw_content}}]
+        return []
