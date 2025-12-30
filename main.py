@@ -114,21 +114,16 @@ class DebouncePlugin(Star):
                     # 计算正态分布随机延迟
                     # mu: 平均等待时间 (即你在配置里填的数字)
                     # sigma: 标准差 (设为 0.25 表示波动幅度适中，模拟人的状态起伏)
+                    # 使用传入的 jitter 计算标准差 
                     mu = float(wait)
-                    sigma = mu * 0.25 
+                    sigma = mu * jitter  # 使用配置的波动值
                     
                     random_wait = random.gauss(mu, sigma)
-                    
-                    # 设置一个下限 (比如 2.0秒)，防止随机出太短的时间，不像是在阅读
-                    # 如果你设定的 wait 很大，这里也可以设 max(wait * 0.5, random_wait)
                     final_wait = max(2.0, random_wait)
-
-                    # 打印日志，方便你在控制台看到苏云久这次思考了多久
-                    logger.info(f"[苏云久] 正在输入... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
-
+                    
+                    logger.info(f"[角色] 正在输入... (基准:{mu}s | 波动:{jitter} | 实际:{final_wait:.2f}s)")
                     await asyncio.sleep(final_wait)
-                    # === [核心修改结束] ===
-
+                
                 except asyncio.CancelledError:
                     return None
 
