@@ -4,6 +4,8 @@ import os
 import tempfile
 import random
 from typing import Dict
+from astrbot.api.all import * # 引入所有基础组件，包括 Plain
+from astrbot.api.message_components import MessageChain # 显式导入 MessageChain，防止报错
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -15,7 +17,7 @@ from astrbot.core.star.star_tools import StarTools
     "astrbot_plugin_delay_ksc",
     "ks-c",
     "消息防抖 (拟人化随机版)",
-    "1.3",
+    "1.6", # 版本升级：修复优先级导致的拦截失效问题
 )
 class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -27,7 +29,6 @@ class DebouncePlugin(Star):
         self.DEFAULT_CONFIG = {"enabled": True, "wait": default_wait, "jitter": 0.25}
 
         self.user_config: Dict[str, Dict[str, object]] = {}
-        # 结构修改：增加 last_event 用于主动回复
         self.debounce_states: Dict[str, Dict] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
 
@@ -100,35 +101,30 @@ class DebouncePlugin(Star):
         async with lock:
             state = self.debounce_states.get(uid)
             
-            # 1. 如果有正在等待的任务，取消它（重置倒计时）
             if state:
+                # 核心逻辑：如果有任务，取消它（实现合并），并追加内容
                 state["task"].cancel()
                 state["prompts"].append(prompt)
                 state["last_event"] = event 
+                logger.info(f"[防抖插件] 检测到新消息，已合并。当前缓冲池大小: {len(state['prompts'])}")
             else:
-                # 2. 如果没有，创建新状态
                 self.debounce_states[uid] = {
                     "prompts": [prompt], 
                     "task": None,
                     "last_event": event
                 }
 
-            # 3. 定义后台执行的闭包函数
             async def debounce_closure():
                 try:
-                    # 计算随机延迟
                     mu = float(wait)
                     sigma = mu * jitter  
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    # === 修改点：日志去掉了特定角色名，改为通用提示 ===
-                    logger.info(f"[防抖插件] 正在等待... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+                    logger.info(f"[防抖插件] 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
                     
-                    # 在这里等待，不阻塞主线程
                     await asyncio.sleep(final_wait)
                     
-                    # === 等待结束，开始回复 ===
                     merged_prompt = ""
                     last_evt = None
                     
@@ -136,36 +132,45 @@ class DebouncePlugin(Star):
                         current_state = self.debounce_states.get(uid)
                         if not current_state: return
                         
+                        # 合并多条消息，用换行符分隔
                         merged_prompt = "\n".join(current_state["prompts"])
                         last_evt = current_state["last_event"]
                         self.debounce_states.pop(uid, None)
                     
-                    # === 主动调用 LLM 发送回复 ===
-                    logger.info(f"[防抖插件] 触发回复，合并内容长度: {len(merged_prompt)}")
-                    
-                    # === 修复点：使用 correct API 获取 LLM ===
+                    # === 阶段1：调用 LLM ===
+                    logger.info(f"[防抖插件] 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
                     provider = self.context.get_using_provider()
-                    if provider:
-                        # 调用 LLM 生成回复
-                        response = await provider.text_chat(merged_prompt, session_id=uid)
-                        if response:
-                            await last_evt.send(response.completion_text)
-                    else:
-                        logger.error("[防抖插件] 未找到可用的 LLM Provider")
+                    if not provider:
+                        logger.error("[防抖插件] 错误：未找到可用的 Provider")
+                        return
+
+                    # 尝试调用 text_chat
+                    response = await provider.text_chat(merged_prompt, session_id=uid)
+                    
+                    if not response or not response.completion_text:
+                        logger.warning("[防抖插件] LLM 返回内容为空")
+                        return
+
+                    logger.info(f"[防抖插件] LLM 生成完毕，准备发送回复")
+
+                    # === 阶段2：发送消息 ===
+                    msg_chain = MessageChain([Plain(response.completion_text)])
+                    await last_evt.send(msg_chain)
 
                 except asyncio.CancelledError:
-                    # 任务被取消说明有新消息来了
+                    # 正常现象：倒计时被新消息打断
                     pass
                 except Exception as e:
+                    import traceback
                     logger.error(f"防抖回复过程出错: {e}")
+                    logger.error(traceback.format_exc())
 
-            # 4. 启动任务
             task = asyncio.create_task(debounce_closure())
             self.debounce_states[uid]["task"] = task
 
-    @filter.on_llm_request(priority=3)
-    async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest, *args): # 添加 *args 接收多余参数
-        """请求开始"""
+    # 修改优先级为 0 (最高)，确保比系统默认处理先执行
+    @filter.on_llm_request(priority=0)
+    async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest, *args):
         umo = event.unified_msg_origin
         id = event.get_sender_id()
         name = event.get_sender_name()
@@ -174,14 +179,15 @@ class DebouncePlugin(Star):
         if not cfg["enabled"]:
             return
 
-        # 群聊信息补充
+        # 构造带有用户身份的 Prompt
         if event.get_group_id() and req.prompt:
             req.prompt = f"[User ID: {id}, Nickname: {name}]\n{req.prompt.strip()}"
 
         current_jitter = cfg.get("jitter", 0.25)
 
-        # 1. 启动/重置倒计时任务
+        # 启动防抖任务
         await self.start_debounce_task(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter, event=event)
         
-        # 2. 拦截当前事件，防止 AstrBot 立即处理
+        # 拦截事件：阻止 AstrBot 继续处理这条消息
+        # 此时 priority=0，我们是第一个拿到的，只要 stop 成功，后面谁也拿不到
         event.stop_event()
