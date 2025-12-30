@@ -12,7 +12,7 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
 @register(
-    "astrbot_delay_ksc",
+    "astrbot_plugin_delay_ksc",
     "ks-c",
     "消息防抖 (拟人化随机版)",
     "1.3",
@@ -122,6 +122,7 @@ class DebouncePlugin(Star):
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
+                    # === 修改点：日志去掉了特定角色名，改为通用提示 ===
                     logger.info(f"[防抖插件] 正在等待... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
                     
                     # 在这里等待，不阻塞主线程
@@ -142,12 +143,15 @@ class DebouncePlugin(Star):
                     # === 主动调用 LLM 发送回复 ===
                     logger.info(f"[防抖插件] 触发回复，合并内容长度: {len(merged_prompt)}")
                     
-                    provider = self.context.provider_manager.get_default_provider()
+                    # === 修复点：使用 correct API 获取 LLM ===
+                    provider = self.context.get_using_provider()
                     if provider:
                         # 调用 LLM 生成回复
                         response = await provider.text_chat(merged_prompt, session_id=uid)
                         if response:
                             await last_evt.send(response.completion_text)
+                    else:
+                        logger.error("[防抖插件] 未找到可用的 LLM Provider")
 
                 except asyncio.CancelledError:
                     # 任务被取消说明有新消息来了
@@ -160,7 +164,7 @@ class DebouncePlugin(Star):
             self.debounce_states[uid]["task"] = task
 
     @filter.on_llm_request(priority=3)
-    async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
+    async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest, *args): # 添加 *args 接收多余参数
         """请求开始"""
         umo = event.unified_msg_origin
         id = event.get_sender_id()
