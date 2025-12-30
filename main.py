@@ -5,7 +5,7 @@ import tempfile
 import random
 from typing import Dict
 from astrbot.api.all import * # 引入所有基础组件，包括 Plain
-from astrbot.api.message_components import MessageChain # 显式导入 MessageChain，防止报错
+from astrbot.api.message_components import MessageChain # 显式导入 MessageChain
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -13,18 +13,20 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
+# === 强制打印：只要文件被读取，控制台必出此日志 ===
+print("====== [消息防抖插件] 正在加载 v1.9 (若未看到此行，说明旧文件未被替换) ======")
+
 @register(
     "astrbot_plugin_delay_ksc",
     "ks-c",
     "消息防抖 (拟人化随机版)",
-    "1.7", # 版本升级：加入启动日志验证，强制刷新缓存
+    "1.9", # 版本升级：加入Top-level日志，清理参数逻辑
 )
 class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
-        # === 启动日志：用于确认代码是否更新成功 ===
-        logger.info("[防抖插件] 正在加载... 当前版本: 1.7 (若未看到此行说明文件未更新)")
+        logger.info("[防抖插件] v1.9 初始化成功。")
         
         DATA_DIR = StarTools.get_data_dir()
         self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
@@ -125,7 +127,7 @@ class DebouncePlugin(Star):
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    logger.info(f"[防抖插件] (v1.7) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+                    logger.info(f"[防抖插件] (v1.9) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
                     
                     await asyncio.sleep(final_wait)
                     
@@ -142,7 +144,7 @@ class DebouncePlugin(Star):
                         self.debounce_states.pop(uid, None)
                     
                     # === 阶段1：调用 LLM ===
-                    logger.info(f"[防抖插件] (v1.7) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
+                    logger.info(f"[防抖插件] (v1.9) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
                     provider = self.context.get_using_provider()
                     if not provider:
                         logger.error("[防抖插件] 错误：未找到可用的 Provider")
@@ -174,7 +176,25 @@ class DebouncePlugin(Star):
 
     # 修改优先级为 0 (最高)，确保比系统默认处理先执行
     @filter.on_llm_request(priority=0)
-    async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest, *args):
+    async def on_llm_req(self, event: AstrMessageEvent, *args, **kwargs):
+        # 兼容性处理：AstrBot 可能会传递 context 等额外参数
+        # 使用 *args 和 **kwargs 接收一切参数，彻底杜绝 TypeError
+        
+        req = None
+        # 尝试从参数中提取 ProviderRequest
+        for arg in args:
+            if isinstance(arg, ProviderRequest):
+                req = arg
+                break
+        
+        # 如果 args 里没找到，可能 user 代码没更新，或者 AstrBot API 变了
+        # 但大概率是 args[0] 就是 req
+        if not req and args and isinstance(args[0], ProviderRequest):
+            req = args[0]
+            
+        if not req:
+            return
+
         umo = event.unified_msg_origin
         id = event.get_sender_id()
         name = event.get_sender_name()
