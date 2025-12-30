@@ -13,20 +13,20 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
-# === 强制日志：使用 logger 而非 print，确保在控制台可见 ===
-logger.warning("====== [防抖插件 v2.0] 模块正在加载！如果不出现此行，说明文件未更新！ ======")
+# === 强制日志：确保在控制台可见 ===
+logger.warning("====== [防抖插件 v2.1] 模块正在加载！若未见此行，说明旧文件未被替换！ ======")
 
 @register(
-    "astrbot_plugin_delay_ksc",
+    "astrbot_delay",
     "ks-c",
     "消息防抖 (拟人化随机版)",
-    "2.0", # 版本升级：强制日志验证
+    "2.1", # 版本升级：加入Provider获取的兼容性处理
 )
 class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         
-        logger.info("[防抖插件] v2.0 实例初始化成功。")
+        logger.info("[防抖插件] v2.1 实例初始化成功。")
         
         DATA_DIR = StarTools.get_data_dir()
         self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
@@ -127,7 +127,7 @@ class DebouncePlugin(Star):
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    logger.info(f"[防抖插件] (v2.0) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+                    logger.info(f"[防抖插件] (v2.1) 启动倒计时... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
                     
                     await asyncio.sleep(final_wait)
                     
@@ -144,10 +144,19 @@ class DebouncePlugin(Star):
                         self.debounce_states.pop(uid, None)
                     
                     # === 阶段1：调用 LLM ===
-                    logger.info(f"[防抖插件] (v2.0) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
-                    provider = self.context.get_using_provider()
+                    logger.info(f"[防抖插件] (v2.1) 倒计时结束，开始请求 LLM。合并内容: {merged_prompt[:50]}...")
+                    
+                    # 兼容性获取 Provider
+                    provider = None
+                    if hasattr(self.context, "get_using_provider"):
+                        provider = self.context.get_using_provider()
+                    elif hasattr(self.context, "provider_manager"):
+                        # 尝试旧版路径，增加安全检查
+                        if hasattr(self.context.provider_manager, "get_default_provider"):
+                            provider = self.context.provider_manager.get_default_provider()
+
                     if not provider:
-                        logger.error("[防抖插件] 错误：未找到可用的 Provider")
+                        logger.error("[防抖插件] 错误：未找到可用的 Provider (get_using_provider 失败)")
                         return
 
                     # 尝试调用 text_chat
