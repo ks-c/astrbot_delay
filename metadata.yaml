@@ -1,5 +1,5 @@
 name: astrbot_plugin_chat_buffer
-desc: 消息防抖，指定时间内的多段消息合并处理
+desc: 消息防抖，指定时间内的多段消息合并处理。新增高斯分布的随机抖动
 version: v1.0
-author: ctrlkk
-repo: https://github.com/ctrlkk/astrbot_plugin_chat_buffer
+author: ksc
+repo: https://github.com/ks-c/astrbot_delay
