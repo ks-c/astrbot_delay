@@ -12,36 +12,30 @@ from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 from astrbot.core.star.star_tools import StarTools
 
 @register(
-    "astrbot_plugin_delay_ksc",    # ID已修改
-    "ks-c",                        # 作者已修改
-    "消息防抖 (拟人化随机版)",       # 描述已修改
-    "1.1",                         # 版本已升级
+    "astrbot_delay_ksc",
+    "ks-c",
+    "消息防抖 (拟人化随机版)",
+    "1.3",
 )
-class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之前重复了
+class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         DATA_DIR = StarTools.get_data_dir()
         self.CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
         default_wait = float(config.get("debounce_wait", 10))
-        # jitter 代表波动幅度，0.25 意味着标准差是等待时间的 25%
         self.DEFAULT_CONFIG = {"enabled": True, "wait": default_wait, "jitter": 0.25}
 
-        # { uid: { "enabled": bool, "wait": float } }
         self.user_config: Dict[str, Dict[str, object]] = {}
-        # 防抖状态 { uid: { "prompts": List[str], "task": asyncio.Task } }
+        # 结构修改：增加 last_event 用于主动回复
         self.debounce_states: Dict[str, Dict] = {}
-        # 每个 uid 独立的锁
         self.locks: Dict[str, asyncio.Lock] = {}
 
         self._load_config()
 
-    async def initialize(self):
-        pass
-
-    async def terminate(self):
-        pass
-
+    async def initialize(self): pass
+    async def terminate(self): pass
+    
     def _load_config(self):
         if os.path.exists(self.CONFIG_FILE):
             try:
@@ -64,7 +58,6 @@ class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之�
 
     @filter.command("开关防抖")
     async def toggle_debounce(self, event: AstrMessageEvent):
-        """开关防抖"""
         uid = event.unified_msg_origin
         cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
         cfg["enabled"] = not cfg.get("enabled", False)
@@ -75,7 +68,6 @@ class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之�
 
     @filter.command("设置防抖时间")
     async def set_debounce_time(self, event: AstrMessageEvent, wait: int):
-        """设置防抖时间 (秒)"""
         uid = event.unified_msg_origin
         if wait < 1:
             yield event.plain_result("防抖时间最少为1秒")
@@ -88,12 +80,10 @@ class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之�
 
     @filter.command("设置波动")
     async def set_jitter(self, event: AstrMessageEvent, jitter: float):
-        """设置防抖随机波动系数 (0.0-1.0)"""
         uid = event.unified_msg_origin
         if jitter < 0 or jitter > 1.0:
             yield event.plain_result("波动系数建议在 0.0 到 1.0 之间")
             return
-        
         cfg = self.user_config.get(uid, self.DEFAULT_CONFIG)
         cfg["jitter"] = jitter
         self.user_config[uid] = cfg
@@ -101,51 +91,73 @@ class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之�
         yield event.plain_result(f"回复随机波动系数已设置为: {jitter}")
 
     def _get_lock(self, uid: str) -> asyncio.Lock:
-        """获取/创建某个 uid 的独立锁"""
         if uid not in self.locks:
             self.locks[uid] = asyncio.Lock()
         return self.locks[uid]
 
-    async def debounce_request(self, uid: str, prompt: str, wait: float, jitter: float = 0.25) -> str:
-        """异步防抖函数：同一 uid 的请求在 wait 秒内合并"""
+    async def start_debounce_task(self, uid: str, prompt: str, wait: float, jitter: float, event: AstrMessageEvent):
         lock = self._get_lock(uid)
         async with lock:
             state = self.debounce_states.get(uid)
+            
+            # 1. 如果有正在等待的任务，取消它（重置倒计时）
             if state:
                 state["task"].cancel()
                 state["prompts"].append(prompt)
-                await asyncio.sleep(0)
+                state["last_event"] = event 
             else:
-                self.debounce_states[uid] = {"prompts": [prompt], "task": None}
+                # 2. 如果没有，创建新状态
+                self.debounce_states[uid] = {
+                    "prompts": [prompt], 
+                    "task": None,
+                    "last_event": event
+                }
 
+            # 3. 定义后台执行的闭包函数
             async def debounce_closure():
                 try:
-                    # 计算正态分布随机延迟
+                    # 计算随机延迟
                     mu = float(wait)
                     sigma = mu * jitter  
-                    
                     random_wait = random.gauss(mu, sigma)
                     final_wait = max(2.0, random_wait)
                     
-                    logger.info(f"[苏云久] 正在输入... (基准:{mu}s | 波动:{jitter} | 实际:{final_wait:.2f}s)")
+                    logger.info(f"[防抖插件] 正在等待... (基准:{mu}s | 实际延迟:{final_wait:.2f}s)")
+                    
+                    # 在这里等待，不阻塞主线程
                     await asyncio.sleep(final_wait)
-                
+                    
+                    # === 等待结束，开始回复 ===
+                    merged_prompt = ""
+                    last_evt = None
+                    
+                    async with self._get_lock(uid):
+                        current_state = self.debounce_states.get(uid)
+                        if not current_state: return
+                        
+                        merged_prompt = "\n".join(current_state["prompts"])
+                        last_evt = current_state["last_event"]
+                        self.debounce_states.pop(uid, None)
+                    
+                    # === 主动调用 LLM 发送回复 ===
+                    logger.info(f"[防抖插件] 触发回复，合并内容长度: {len(merged_prompt)}")
+                    
+                    provider = self.context.provider_manager.get_default_provider()
+                    if provider:
+                        # 调用 LLM 生成回复
+                        response = await provider.text_chat(merged_prompt, session_id=uid)
+                        if response:
+                            await last_evt.send(response.completion_text)
+
                 except asyncio.CancelledError:
-                    return None
+                    # 任务被取消说明有新消息来了
+                    pass
+                except Exception as e:
+                    logger.error(f"防抖回复过程出错: {e}")
 
-                state = self.debounce_states.get(uid)
-                if not state:
-                    return None
-
-                merged_prompt = "\n".join(state["prompts"])
-                self.debounce_states.pop(uid, None)
-                return merged_prompt
-
+            # 4. 启动任务
             task = asyncio.create_task(debounce_closure())
             self.debounce_states[uid]["task"] = task
-
-        result = await task
-        return result
 
     @filter.on_llm_request(priority=3)
     async def on_llm_req(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -153,35 +165,19 @@ class DebouncePlugin(Star):        # <--- 注意：这里只有一行了，之�
         umo = event.unified_msg_origin
         id = event.get_sender_id()
         name = event.get_sender_name()
+        
         cfg = self.user_config.get(umo, self.DEFAULT_CONFIG)
         if not cfg["enabled"]:
             return
 
-        # 群聊中加入用户识别
+        # 群聊信息补充
         if event.get_group_id() and req.prompt:
             req.prompt = f"[User ID: {id}, Nickname: {name}]\n{req.prompt.strip()}"
 
         current_jitter = cfg.get("jitter", 0.25)
-        
-        merged_prompt = await self.debounce_request(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter)
-        
-        if merged_prompt is None:
-            event.stop_event()
-            return
-        req.prompt = merged_prompt
-        logger.info(f"最终提示词：{req.prompt}")
 
-    @filter.on_llm_response()
-    async def on_llm_resp(self, event: AstrMessageEvent, resp: LLMResponse):
-        """请求结束"""
-        uid = event.unified_msg_origin
-        lock = self._get_lock(uid)
-        async with lock:
-            state = self.debounce_states.get(uid)
-            if state and state["task"]:
-                state["task"].cancel()
-                try:
-                    await state["task"]
-                except asyncio.CancelledError:
-                    pass
-            self.debounce_states.pop(uid, None)
+        # 1. 启动/重置倒计时任务
+        await self.start_debounce_task(umo, req.prompt, wait=cfg["wait"], jitter=current_jitter, event=event)
+        
+        # 2. 拦截当前事件，防止 AstrBot 立即处理
+        event.stop_event()
