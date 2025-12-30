@@ -19,7 +19,6 @@ from astrbot.core.star.star_tools import StarTools
 )
 
 class DebouncePlugin(Star):
-class DebouncePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         DATA_DIR = StarTools.get_data_dir()
